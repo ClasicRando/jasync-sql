@@ -517,7 +517,7 @@ class PostgreSQLConnection @JvmOverloads constructor(
 
     override fun onCopyData(message: CopyDataMessage) {
         logger.atTrace {
-            this.message = "Received data row: ${message.row}"
+            this.message = "Received data row, ${message.row.size} bytes"
         }
         copyOutChannel.ifPresent {
             if (copyDataPromise().isPresent) {
@@ -604,17 +604,13 @@ class PostgreSQLConnection @JvmOverloads constructor(
     }
 
     private fun succeedCopyDataPromise(result: ByteArray?) {
-        this.queryResult = Optional.empty()
-        this.currentQuery = Optional.empty()
         this.clearCopyDataPromise().ifPresent {
             it.success(result)
         }
     }
 
     private fun endCopyMode() {
-        if (copyDataPromise().isPresent) {
-            succeedCopyDataPromise(null)
-        }
+        succeedCopyDataPromise(null)
         copyInMode.set(false)
         copyOutMode.set(false)
         copyOutChannel = Optional.empty()
