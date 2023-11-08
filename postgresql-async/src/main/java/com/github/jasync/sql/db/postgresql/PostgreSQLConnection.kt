@@ -20,7 +20,9 @@ import com.github.jasync.sql.db.postgresql.column.PostgreSQLColumnDecoderRegistr
 import com.github.jasync.sql.db.postgresql.column.PostgreSQLColumnEncoderRegistry
 import com.github.jasync.sql.db.postgresql.exceptions.AuthenticationException
 import com.github.jasync.sql.db.postgresql.exceptions.GenericDatabaseException
+import com.github.jasync.sql.db.postgresql.exceptions.InCopyModeException
 import com.github.jasync.sql.db.postgresql.exceptions.MissingCredentialInformationException
+import com.github.jasync.sql.db.postgresql.exceptions.NotInCopyModeException
 import com.github.jasync.sql.db.postgresql.exceptions.PendingCloseStatementException
 import com.github.jasync.sql.db.postgresql.exceptions.QueryMustNotBeNullOrEmptyException
 import com.github.jasync.sql.db.postgresql.messages.backend.AuthenticationCleartextPasswordMessage
@@ -32,13 +34,17 @@ import com.github.jasync.sql.db.postgresql.messages.backend.AuthenticationSASLFi
 import com.github.jasync.sql.db.postgresql.messages.backend.AuthenticationSASLMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.AuthenticationSimpleChallenge
 import com.github.jasync.sql.db.postgresql.messages.backend.CommandCompleteMessage
+import com.github.jasync.sql.db.postgresql.messages.backend.CopyDataMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.DataRowMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.ErrorMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.NotificationResponse
 import com.github.jasync.sql.db.postgresql.messages.backend.ParameterStatusMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.PostgreSQLColumnData
 import com.github.jasync.sql.db.postgresql.messages.backend.RowDescriptionMessage
+import com.github.jasync.sql.db.postgresql.messages.frontend.ClientCopyDataMessage
 import com.github.jasync.sql.db.postgresql.messages.frontend.ClientMessage
+import com.github.jasync.sql.db.postgresql.messages.frontend.CopyDoneMessage
+import com.github.jasync.sql.db.postgresql.messages.frontend.CopyFailMessage
 import com.github.jasync.sql.db.postgresql.messages.frontend.PasswordMessage
 import com.github.jasync.sql.db.postgresql.messages.frontend.PreparedStatementCloseMessage
 import com.github.jasync.sql.db.postgresql.messages.frontend.PreparedStatementExecuteMessage
@@ -62,13 +68,17 @@ import com.ongres.scram.client.ScramSession
 import com.ongres.scram.common.exception.ScramException
 import com.ongres.scram.common.stringprep.StringPreparations
 import io.github.oshai.kotlinlogging.KotlinLogging
+import io.netty.buffer.ByteBuf
 import java.time.Duration
 import java.util.Collections
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Function
+import javax.management.Query
 
 private val logger = KotlinLogging.logger {}
 
@@ -166,6 +176,9 @@ class PostgreSQLConnection @JvmOverloads constructor(
     fun parameterStatuses(): Map<String, String> = this.parameterStatus.toMap()
 
     override fun sendQueryDirect(query: String): CompletableFuture<QueryResult> {
+        if (isInCopyMode) {
+            throw InCopyModeException()
+        }
         logger.trace { "sendQueryDirect - $connectionId $query" }
         validateQuery(query)
 
@@ -178,6 +191,9 @@ class PostgreSQLConnection @JvmOverloads constructor(
     }
 
     override fun sendPreparedStatementDirect(params: PreparedStatementParams): CompletableFuture<QueryResult> {
+        if (isInCopyMode) {
+            throw InCopyModeException()
+        }
         logger.trace { "sendPreparedStatementDirect - $connectionId $params" }
         validateQuery(params.query)
 
@@ -248,6 +264,14 @@ class PostgreSQLConnection @JvmOverloads constructor(
     }
 
     override fun onError(message: ErrorMessage) {
+        if (copyFailed.get()) {
+            logger.atTrace {
+                this.message = "CopyIn failed by client"
+            }
+            queryResult = Optional.of(QueryResult(0, "CopyIn failed by client"))
+            return
+        }
+
         logger.error("Error , message -> {}", message)
 
         val error = GenericDatabaseException(message)
@@ -465,5 +489,138 @@ class PostgreSQLConnection @JvmOverloads constructor(
                 reference.success(statement)
             }
         }
+    }
+
+    private val copyInMode = AtomicBoolean(false)
+    private val copyOutMode = AtomicBoolean(false)
+    private val copyFailed = AtomicBoolean(false)
+    private val isInCopyMode get() = copyInMode.get() || copyOutMode.get()
+
+    override fun onCopyInResponse() {
+        logger.atTrace {
+            message = "CopyIn Started"
+        }
+        copyInMode.set(true)
+        onCommandComplete(CommandCompleteMessage(0, "CopyIn Started"))
+        onReadyForQuery()
+    }
+
+    override fun onCopyOutResponse() {
+        logger.atTrace {
+            message = "CopyOut Started"
+        }
+        copyOutMode.set(true)
+        copyOutChannel = Optional.of(ConcurrentLinkedQueue<ByteArray>())
+        onCommandComplete(CommandCompleteMessage(0, "CopyOut Started"))
+        onReadyForQuery()
+    }
+
+    override fun onCopyData(message: CopyDataMessage) {
+        logger.atTrace {
+            this.message = "Received data row: ${message.row}"
+        }
+        copyOutChannel.ifPresent {
+            if (copyDataPromise().isPresent) {
+                succeedCopyDataPromise(message.row)
+            } else {
+                it.add(message.row)
+            }
+        }
+    }
+
+    fun writeCopyData(bytes: ByteArray) {
+        if (!copyInMode.get()) {
+            throw NotInCopyModeException()
+        }
+        write(ClientCopyDataMessage(bytes))
+    }
+
+    fun endCopy(): CompletableFuture<QueryResult> {
+        if (!copyInMode.get()) {
+            throw NotInCopyModeException()
+        }
+
+        val promise = CompletableFuture<QueryResult>()
+        this.setQueryPromise(promise)
+
+        write(CopyDoneMessage)
+        endCopyMode()
+        return promise
+    }
+
+    fun failCopy(message: String): CompletableFuture<QueryResult> {
+        if (!copyInMode.get()) {
+            throw NotInCopyModeException()
+        }
+
+        val promise = CompletableFuture<QueryResult>()
+        this.setQueryPromise(promise)
+
+        copyFailed.set(true)
+        write(CopyFailMessage(message))
+        endCopyMode()
+        return promise
+    }
+
+    private var copyOutChannel: Optional<ConcurrentLinkedQueue<ByteArray>> = Optional.empty()
+    private val copyDataPromiseReference = AtomicReference<Optional<CompletableFuture<ByteArray?>>>(Optional.empty())
+
+    fun readCopyData(): CompletableFuture<ByteArray?> {
+        val promise = CompletableFuture<ByteArray?>()
+        this.setCopyDataPromise(promise)
+
+        if (!copyOutMode.get()) {
+            failCopyDataPromise(NotInCopyModeException())
+            endCopyMode()
+            return promise
+        }
+
+        copyOutChannel.ifPresent { channel ->
+            channel.poll()?.let {
+                succeedCopyDataPromise(it)
+            }
+        }
+
+        return promise
+    }
+
+    private fun copyDataPromise(): Optional<CompletableFuture<ByteArray?>> = copyDataPromiseReference.get()
+
+    private fun setCopyDataPromise(promise: CompletableFuture<ByteArray?>) {
+        if (!this.copyDataPromiseReference.compareAndSet(Optional.empty(), Optional.of(promise))) {
+            notReadyForQueryError("Can't run query due to a race , another started query", true)
+        }
+    }
+
+    private fun clearCopyDataPromise(): Optional<CompletableFuture<ByteArray?>> {
+        return this.copyDataPromiseReference.getAndSet(Optional.empty())
+    }
+
+    private fun failCopyDataPromise(t: Throwable) {
+        this.clearCopyDataPromise().ifPresent { promise ->
+            logger.error("Setting error on future {}", promise)
+            promise.failed(t)
+        }
+    }
+
+    private fun succeedCopyDataPromise(result: ByteArray?) {
+        this.queryResult = Optional.empty()
+        this.currentQuery = Optional.empty()
+        this.clearCopyDataPromise().ifPresent {
+            it.success(result)
+        }
+    }
+
+    private fun endCopyMode() {
+        if (copyDataPromise().isPresent) {
+            succeedCopyDataPromise(null)
+        }
+        copyInMode.set(false)
+        copyOutMode.set(false)
+        copyOutChannel = Optional.empty()
+    }
+
+    override fun onCopyDone() {
+        endCopyMode()
     }
 }

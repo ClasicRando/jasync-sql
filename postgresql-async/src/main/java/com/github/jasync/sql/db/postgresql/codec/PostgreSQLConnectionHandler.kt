@@ -6,6 +6,7 @@ import com.github.jasync.sql.db.column.ColumnEncoderRegistry
 import com.github.jasync.sql.db.postgresql.exceptions.QueryMustNotBeNullOrEmptyException
 import com.github.jasync.sql.db.postgresql.messages.backend.AuthenticationMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.CommandCompleteMessage
+import com.github.jasync.sql.db.postgresql.messages.backend.CopyDataMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.DataRowMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.ErrorMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.NotificationResponse
@@ -173,6 +174,18 @@ class PostgreSQLConnectionHandler(
                     }
                     ServerMessage.CommandComplete -> {
                         connectionDelegate.onCommandComplete(message as CommandCompleteMessage)
+                    }
+                    ServerMessage.CopyData -> {
+                        connectionDelegate.onCopyData(message as CopyDataMessage)
+                    }
+                    ServerMessage.CopyDone -> {
+                        connectionDelegate.onCopyDone()
+                    }
+                    ServerMessage.CopyInResponse -> {
+                        connectionDelegate.onCopyInResponse()
+                    }
+                    ServerMessage.CopyOutResponse -> {
+                        connectionDelegate.onCopyOutResponse()
                     }
                     ServerMessage.CloseComplete -> {
                         connectionDelegate.onCloseComplete()

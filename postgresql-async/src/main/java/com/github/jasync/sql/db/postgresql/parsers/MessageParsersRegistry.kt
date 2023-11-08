@@ -18,6 +18,10 @@ class MessageParsersRegistry(val charset: Charset) {
             ServerMessage.Authentication -> AuthenticationStartupParser
             ServerMessage.BackendKeyData -> BackendKeyDataParser
             ServerMessage.BindComplete -> ReturningMessageParser.BindCompleteMessageParser
+            ServerMessage.CopyData -> CopyDataParser
+            ServerMessage.CopyDone -> ReturningMessageParser.CopyDoneMessageParser
+            ServerMessage.CopyInResponse -> CopyInResponseParser
+            ServerMessage.CopyOutResponse -> CopyOutResponseParser
             ServerMessage.CloseComplete -> ReturningMessageParser.CloseCompleteMessageParser
             ServerMessage.CommandComplete -> this.commandCompleteParser
             ServerMessage.DataRow -> DataRowParser

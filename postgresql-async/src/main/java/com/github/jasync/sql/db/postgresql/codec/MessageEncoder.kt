@@ -2,8 +2,11 @@ package com.github.jasync.sql.db.postgresql.codec
 
 import com.github.jasync.sql.db.column.ColumnEncoderRegistry
 import com.github.jasync.sql.db.exceptions.EncoderNotAvailableException
+import com.github.jasync.sql.db.postgresql.encoders.ClientCopyDataMessageEncoder
 import com.github.jasync.sql.db.postgresql.encoders.CloseMessageEncoder
 import com.github.jasync.sql.db.postgresql.encoders.CloseStatementEncoder
+import com.github.jasync.sql.db.postgresql.encoders.CopyDoneMessageEncoder
+import com.github.jasync.sql.db.postgresql.encoders.CopyFailMessageEncoder
 import com.github.jasync.sql.db.postgresql.encoders.ExecutePreparedStatementEncoder
 import com.github.jasync.sql.db.postgresql.encoders.PasswordEncoder
 import com.github.jasync.sql.db.postgresql.encoders.PreparedStatementOpeningEncoder
@@ -29,6 +32,7 @@ class MessageEncoder(charset: Charset, encoderRegistry: ColumnEncoderRegistry) :
     private val queryEncoder = QueryMessageEncoder(charset)
     private val passwordEncoder = PasswordEncoder(charset)
     private val closeStatementOrPortalEncoder = CloseStatementEncoder(charset)
+    private val copyFailEncoder = CopyFailMessageEncoder(charset)
 
     override fun encode(ctx: ChannelHandlerContext, msg: Any, out: MutableList<Any>) {
         val buffer = when (msg) {
@@ -36,6 +40,9 @@ class MessageEncoder(charset: Charset, encoderRegistry: ColumnEncoderRegistry) :
             is StartupMessage -> startupEncoder.encode(msg)
             is ClientMessage -> {
                 val encoder = when (msg.kind) {
+                    ServerMessage.CopyData -> ClientCopyDataMessageEncoder
+                    ServerMessage.CopyDone -> CopyDoneMessageEncoder
+                    ServerMessage.CopyFail -> this.copyFailEncoder
                     ServerMessage.Close -> CloseMessageEncoder
                     ServerMessage.Execute -> this.executeEncoder
                     ServerMessage.Parse -> this.openEncoder

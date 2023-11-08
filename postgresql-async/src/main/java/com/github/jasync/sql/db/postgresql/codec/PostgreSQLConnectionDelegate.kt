@@ -2,6 +2,7 @@ package com.github.jasync.sql.db.postgresql.codec
 
 import com.github.jasync.sql.db.postgresql.messages.backend.AuthenticationMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.CommandCompleteMessage
+import com.github.jasync.sql.db.postgresql.messages.backend.CopyDataMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.DataRowMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.ErrorMessage
 import com.github.jasync.sql.db.postgresql.messages.backend.NotificationResponse
@@ -12,6 +13,10 @@ interface PostgreSQLConnectionDelegate {
     fun onAuthenticationResponse(message: AuthenticationMessage)
     fun onCommandComplete(message: CommandCompleteMessage)
     fun onCloseComplete()
+    fun onCopyInResponse()
+    fun onCopyOutResponse()
+    fun onCopyData(message: CopyDataMessage)
+    fun onCopyDone()
     fun onDataRow(message: DataRowMessage)
     fun onError(message: ErrorMessage)
     fun onError(throwable: Throwable)

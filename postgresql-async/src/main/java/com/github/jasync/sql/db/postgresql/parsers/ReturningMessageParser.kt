@@ -2,6 +2,7 @@ package com.github.jasync.sql.db.postgresql.parsers
 
 import com.github.jasync.sql.db.postgresql.messages.backend.BindComplete
 import com.github.jasync.sql.db.postgresql.messages.backend.CloseComplete
+import com.github.jasync.sql.db.postgresql.messages.backend.CopyDone
 import com.github.jasync.sql.db.postgresql.messages.backend.EmptyQueryString
 import com.github.jasync.sql.db.postgresql.messages.backend.NoData
 import com.github.jasync.sql.db.postgresql.messages.backend.ParseComplete
@@ -11,6 +12,7 @@ import io.netty.buffer.ByteBuf
 enum class ReturningMessageParser(val message: ServerMessage) : MessageParser {
 
     BindCompleteMessageParser(BindComplete),
+    CopyDoneMessageParser(CopyDone),
     CloseCompleteMessageParser(CloseComplete),
     EmptyQueryStringMessageParser(EmptyQueryString),
     NoDataMessageParser(NoData),
