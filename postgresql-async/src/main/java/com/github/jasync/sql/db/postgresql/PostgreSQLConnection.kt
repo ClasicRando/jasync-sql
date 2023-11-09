@@ -18,6 +18,7 @@ import com.github.jasync.sql.db.postgresql.codec.PostgreSQLConnectionDelegate
 import com.github.jasync.sql.db.postgresql.codec.PostgreSQLConnectionHandler
 import com.github.jasync.sql.db.postgresql.column.PostgreSQLColumnDecoderRegistry
 import com.github.jasync.sql.db.postgresql.column.PostgreSQLColumnEncoderRegistry
+import com.github.jasync.sql.db.postgresql.copy.CopyOutIterator
 import com.github.jasync.sql.db.postgresql.exceptions.AuthenticationException
 import com.github.jasync.sql.db.postgresql.exceptions.GenericDatabaseException
 import com.github.jasync.sql.db.postgresql.exceptions.InCopyModeException
@@ -72,11 +73,11 @@ import java.time.Duration
 import java.util.Collections
 import java.util.Optional
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Function
+import kotlin.jvm.optionals.getOrNull
 
 private val logger = KotlinLogging.logger {}
 
@@ -263,9 +264,7 @@ class PostgreSQLConnection @JvmOverloads constructor(
 
     override fun onError(message: ErrorMessage) {
         if (copyFailed.get()) {
-            logger.atTrace {
-                this.message = "CopyIn failed by client"
-            }
+            copyFailed.set(false)
             queryResult = Optional.of(QueryResult(0, "CopyIn failed by client"))
             return
         }
@@ -492,40 +491,43 @@ class PostgreSQLConnection @JvmOverloads constructor(
     private val copyInMode = AtomicBoolean(false)
     private val copyOutMode = AtomicBoolean(false)
     private val copyFailed = AtomicBoolean(false)
+    private var copyOutIter: Optional<CopyOutIterator> = Optional.empty()
     private val isInCopyMode get() = copyInMode.get() || copyOutMode.get()
 
+    internal fun endCopyOutMode() {
+        copyOutMode.set(false)
+        copyOutIter = Optional.empty()
+    }
+
     override fun onCopyInResponse() {
-        logger.atTrace {
-            message = "CopyIn Started"
-        }
         copyInMode.set(true)
         onCommandComplete(CommandCompleteMessage(0, "CopyIn Started"))
         onReadyForQuery()
     }
 
     override fun onCopyOutResponse() {
-        logger.atTrace {
-            message = "CopyOut Started"
-        }
         copyOutMode.set(true)
-        copyOutChannel = Optional.of(ConcurrentLinkedQueue<ByteArray>())
+        copyOutIter = Optional.of(CopyOutIterator(this))
         onCommandComplete(CommandCompleteMessage(0, "CopyOut Started"))
         onReadyForQuery()
     }
 
     override fun onCopyData(message: CopyDataMessage) {
-        logger.atTrace {
-            this.message = "Received data row, ${message.row.size} bytes"
-        }
-        copyOutChannel.ifPresent {
-            if (copyDataPromise().isPresent) {
-                succeedCopyDataPromise(message.row)
-            } else {
-                it.add(message.row)
-            }
+        copyOutIter.ifPresent {
+            it.put(message.row)
         }
     }
 
+    /**
+     * Write the full buffer of [bytes] to the server as part of a CopyIn operation. This does not
+     * need to be a single row of data, but it must confirm to COPY standards based upon the format
+     * specified.
+     *
+     * **See Also** [postgres docs](https://www.postgresql.org/docs/16/sql-copy.html)
+     *
+     * @exception NotInCopyModeException If the connection is not in copy in state. To initiate,
+     * issue a "COPY table_name FROM STDIN options" query
+     */
     fun writeCopyData(bytes: ByteArray) {
         if (!copyInMode.get()) {
             throw NotInCopyModeException()
@@ -533,6 +535,16 @@ class PostgreSQLConnection @JvmOverloads constructor(
         write(ClientCopyDataMessage(bytes))
     }
 
+    /**
+     * Send the server a copy completion message. If the copy was successful, the future will
+     * resolve to a [QueryResult] containing a [QueryResult.rowsAffected] with the number of rows
+     * copied to the server.
+     *
+     * **See Also** [postgres docs](https://www.postgresql.org/docs/16/sql-copy.html)
+     *
+     * @exception NotInCopyModeException If the connection is not in copy in state. To initiate,
+     * issue a "COPY table_name FROM STDIN (options)" query
+     */
     fun endCopy(): CompletableFuture<QueryResult> {
         if (!copyInMode.get()) {
             throw NotInCopyModeException()
@@ -542,10 +554,20 @@ class PostgreSQLConnection @JvmOverloads constructor(
         this.setQueryPromise(promise)
 
         write(CopyDoneMessage)
-        endCopyMode()
+        copyInMode.set(false)
         return promise
     }
 
+    /**
+     * Send the server a copy fail message. This aborts the copy but does not throw an exception or
+     * close the connection. The future returned will complete with a [QueryResult] containing
+     * [QueryResult.rowsAffected] == 0.
+     *
+     * **See Also** [postgres docs](https://www.postgresql.org/docs/16/sql-copy.html)
+     *
+     * @exception NotInCopyModeException If the connection is not in copy in state. To initiate,
+     * issue a "COPY table_name FROM STDIN (options)" query
+     */
     fun failCopy(message: String): CompletableFuture<QueryResult> {
         if (!copyInMode.get()) {
             throw NotInCopyModeException()
@@ -556,65 +578,37 @@ class PostgreSQLConnection @JvmOverloads constructor(
 
         copyFailed.set(true)
         write(CopyFailMessage(message))
-        endCopyMode()
-        return promise
-    }
-
-    private var copyOutChannel: Optional<ConcurrentLinkedQueue<ByteArray>> = Optional.empty()
-    private val copyDataPromiseReference = AtomicReference<Optional<CompletableFuture<ByteArray?>>>(Optional.empty())
-
-    fun readCopyData(): CompletableFuture<ByteArray?> {
-        val promise = CompletableFuture<ByteArray?>()
-        this.setCopyDataPromise(promise)
-
-        if (!copyOutMode.get()) {
-            failCopyDataPromise(NotInCopyModeException())
-            endCopyMode()
-            return promise
-        }
-
-        copyOutChannel.ifPresent { channel ->
-            channel.poll()?.let {
-                succeedCopyDataPromise(it)
-            }
-        }
-
-        return promise
-    }
-
-    private fun copyDataPromise(): Optional<CompletableFuture<ByteArray?>> = copyDataPromiseReference.get()
-
-    private fun setCopyDataPromise(promise: CompletableFuture<ByteArray?>) {
-        if (!this.copyDataPromiseReference.compareAndSet(Optional.empty(), Optional.of(promise))) {
-            notReadyForQueryError("Can't run query due to a race , another started query", true)
-        }
-    }
-
-    private fun clearCopyDataPromise(): Optional<CompletableFuture<ByteArray?>> {
-        return this.copyDataPromiseReference.getAndSet(Optional.empty())
-    }
-
-    private fun failCopyDataPromise(t: Throwable) {
-        this.clearCopyDataPromise().ifPresent { promise ->
-            logger.error("Setting error on future {}", promise)
-            promise.failed(t)
-        }
-    }
-
-    private fun succeedCopyDataPromise(result: ByteArray?) {
-        this.clearCopyDataPromise().ifPresent {
-            it.success(result)
-        }
-    }
-
-    private fun endCopyMode() {
-        succeedCopyDataPromise(null)
         copyInMode.set(false)
-        copyOutMode.set(false)
-        copyOutChannel = Optional.empty()
+        return promise
+    }
+
+    /**
+     * Iterate over the received table rows sent by the server. Each element from the [Iterator]
+     * will return a single row as a [ByteArray]. The order of the rows is based upon the server's
+     * ordering of sent data so there is no guarantee they will match the ordering of a SELECT on
+     * the same table in the database.
+     *
+     * **Note** Yielding a new element is a blocking operation since the server latency might leave
+     * the backing queue with no elements for the consumer to call [Iterator.next]. This is unlikely
+     * but performance might be impacted at high latency or large throughput of rows (i.e. copying
+     * tables that contain a row count > [Int.MAX_VALUE]).
+     *
+     * **See Also** [postgres docs](https://www.postgresql.org/docs/16/sql-copy.html)
+     *
+     * @exception NotInCopyModeException If the connection is not in copy out state. To initiate,
+     * issue a "COPY table_name TO STDOUT (options)" query
+     */
+    fun readCopyData(): Iterator<ByteArray> {
+        if (!copyOutMode.get()) {
+            throw NotInCopyModeException()
+        }
+        // This should never error since copyOutIter is always present if copyOutMode == true
+        return copyOutIter.getOrNull() ?: error("CopyOut iterator is not set but copy mode on")
     }
 
     override fun onCopyDone() {
-        endCopyMode()
+        copyOutIter.ifPresent {
+            it.markDone()
+        }
     }
 }
