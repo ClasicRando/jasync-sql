@@ -59,6 +59,9 @@ class CopyOutSpec : DatabaseTestHelper() {
             }
 
             assertThat(rowCount).isEqualTo(100)
+
+            // Confirm that query execution is enabled after copy out completed
+            executeQuery(handler, "SELECT 1")
         }
     }
 

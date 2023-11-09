@@ -42,6 +42,34 @@ class CopyInSpec : DatabaseTestHelper() {
             assertThat(copyResult.rowsAffected).isEqualTo(100)
             assertThat(copyResult.statusMessage).isEqualTo("COPY 100")
             assertThat(copyResult.rows.length).isEqualTo(0)
+
+            // Confirm that query execution is enabled after copy out completed
+            executeQuery(handler, "SELECT 1")
+        }
+    }
+
+    @Test
+    fun `copy in should abort without exception when failing copy`() {
+        init()
+
+        withHandler { handler ->
+            val copyQuery = "COPY testing.copy_in_table FROM STDIN WITH (FORMAT csv)"
+            val result = executeQuery(handler, copyQuery)
+            assertThat(result.rowsAffected).isEqualTo(0)
+            assertThat(result.statusMessage).isEqualTo("CopyIn Started")
+            assertThat(result.rows.length).isEqualTo(0)
+
+            for (i in 1..100) {
+                handler.writeCopyData("$i,Row $i\n".toByteArray())
+            }
+
+            val copyResult = awaitFuture(handler.failCopy("Test fail"))
+            assertThat(copyResult.rowsAffected).isEqualTo(0)
+            assertThat(copyResult.statusMessage).isEqualTo("CopyIn failed by client")
+            assertThat(copyResult.rows.length).isEqualTo(0)
+
+            // Confirm that query execution is enabled after copy out completed
+            executeQuery(handler, "SELECT 1")
         }
     }
 
