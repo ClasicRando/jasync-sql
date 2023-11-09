@@ -3,7 +3,7 @@ package com.github.jasync.sql.db.postgresql.messages.backend
 data class CopyOutResponseMessage(
     val isBinary: Boolean,
     val columnCount: Int,
-    val columnData: Array<Boolean>,
+    val columnData: Array<Boolean>
 ) : ServerMessage(ServerMessage.CopyOutResponse) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

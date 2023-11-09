@@ -68,7 +68,6 @@ import com.ongres.scram.client.ScramSession
 import com.ongres.scram.common.exception.ScramException
 import com.ongres.scram.common.stringprep.StringPreparations
 import io.github.oshai.kotlinlogging.KotlinLogging
-import io.netty.buffer.ByteBuf
 import java.time.Duration
 import java.util.Collections
 import java.util.Optional
@@ -78,7 +77,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Function
-import javax.management.Query
 
 private val logger = KotlinLogging.logger {}
 
